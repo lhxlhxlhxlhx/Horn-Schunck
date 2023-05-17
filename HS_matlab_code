@@ -1,0 +1,209 @@
+% 基于Horn-Schunck光流法的目标跟踪检测
+% 电信2004 李豪现 phone:17769888806
+clc;clear;close all;
+videofile = 'video2.avi';
+disp(['输入视频：',videofile])
+video=VideoReader(videofile);
+cols=video.Width;%视频长
+rows=video.Height;%视频宽
+% get(video) %显示视频详细信息
+% implay(videofile)%显示原视频
+hReader = vision.VideoFileReader(videofile, 'ImageColorSpace', 'RGB','VideoOutputDataType', 'single');%创建对象
+
+
+%创建中值滤波器，消除斑点噪声
+hFilter1 = vision.MedianFilter([3 3]);%3*3中值滤波器
+
+%使用Horn-Schunck光流法，参考帧延迟3帧
+hFlow = vision.OpticalFlow('OutputValue', 'Horizontal and vertical components in complex form', 'ReferenceFrameDelay', 3, 'Method','Horn-Schunck');
+%创建两个均值对象，用于分析光流矢量
+hMean1 = vision.Mean;
+hMean2 = vision.Mean('RunningMean', true); %累计平均，每输入一个数据就重新计算均值
+%使用阈值分割提取运动对象，并用中值滤波去掉噪声
+hFilter2 = vision.MedianFilter;%中值滤波器去除阈值分割后产生的噪声
+%显示光流矢量的像素点
+[xpos,ypos]=meshgrid(1:3:cols,1:3:rows);%每隔5行5列选择像素点
+xpos=xpos(:); ypos=ypos(:);
+locs=sub2ind([rows,cols],ypos,xpos);%sub2ind将行列作为下标，方便像素点索引
+
+
+%形态学滤波参数预置
+if(strcmp(videofile, 'video1.avi' )||strcmp(videofile, 'video2.avi' ))
+    strel_const=115;%[小物体]结构元素半径115
+    MinimumBlobArea_const=1000;%[小物体]最小块面积设为1000
+    cols_0=-1200 ;rows_0=60;row_add=1;%输出显示位置参数
+    if(strcmp(videofile, 'video2.avi' ))
+        cols_0=-700;
+    end
+elseif(strcmp(videofile, 'video3.avi' )||strcmp(videofile, 'video4.avi' ))
+    strel_const=40;%[大物体]结构元素半径40
+    MinimumBlobArea_const=6000;%[大物体]最小块面积设为6000
+    cols_0=-700 ;rows_0=-480;row_add=2/3;%输出显示位置参数
+else
+    strel_const=40;%默认
+    MinimumBlobArea_const=6000;%默认
+end
+strel_const2=5-strcmp(videofile, 'video3.avi' );%结构元素参数预置
+
+%创建腐蚀对象hErode
+hErode = vision.MorphologicalErode('Neighborhood', strel('square',strel_const2));%形态学腐蚀
+%创建闭运算对象hClose
+hClose = vision.MorphologicalClose('Neighborhood',strel('disk',strel_const));   %形态学闭运算
+
+
+%创建联通域计算对象，计算二元图像联通区域
+hBlob = vision.BlobAnalysis( 'CentroidOutputPort', false, 'AreaOutputPort', ...
+    true, 'BoundingBoxOutputPort', true,'PerimeterOutputPort',true, ...
+    'OutputDataType', 'double', 'MinimumBlobArea', MinimumBlobArea_const,...
+    'MaximumBlobArea', round(cols*rows/2), 'MaximumCount', 1);
+% hBlob是符合预置面积条件的一个连通域，包含面积、周长等信息。
+% CentroidOutputPort — 返回块重心坐标
+% AreaOutputPort — 返回块面积
+% BoundingBoxOutputPort — 返回边界框坐标
+% PerimeterOutputPort — 返回块周长的估计向量
+% OutputDataType — 返回统计值的数据类型
+% MinimumBlobArea — 最小块面积，以像素为单位
+% MaximumBlobArea — 最大块面积，以像素为单位
+% MaximumCount — 每一幅图片最大标记区域数量
+%创建嵌入形状对象，用于框出目标边界
+hShape1 = vision.ShapeInserter( 'BorderColor', 'Custom',  'CustomBorderColor', [0 1 0]);%定义边框颜色为浅绿色
+hShape2 = vision.ShapeInserter( 'Shape','Lines',  'BorderColor', 'Custom', 'CustomBorderColor', [255 255 0]);%光流矢量为黄色
+
+
+
+%跟踪判定标志
+x_0=cols/1.8;y_0=rows/1.8;A=[];
+%视情况确定初始检测中心，取在视频图像中心位置附近
+flag=0;%flag为跟踪标识，flag=1才跟踪目标、添加边框
+
+%距离检测标志
+S_m = 0;   %距离判断指针
+S=0;th=0;
+f_sm=0;%f_sm为距离标识，f_sm=1表示物体靠近，f_sm=-1表示物体远离
+
+
+%创建视频播放对象，一帧一帧显示原始视频，运动矢量，分割结果和最终结果
+pos = [cols_0, rows_0,cols,rows];
+pos(1) = pos(1)+cols;
+hVideo1 = vision.VideoPlayer('Name','中值滤波结果','Position',pos);
+pos(1) = pos(1)+cols;
+hVideo2 = vision.VideoPlayer('Name','添加光流矢量后的结果','Position',pos);
+pos = [cols_0, rows_0-rows*row_add,cols,rows];
+pos(1) = pos(1)+cols;
+hVideo3 = vision.VideoPlayer('Name','形态学腐蚀后的结果','Position',pos);
+pos(1) = pos(1)+cols;
+hVideo4 = vision.VideoPlayer('Name','闭运算填充后的结果','Position',pos);
+pos(1) = pos(1)-1/2*cols;
+pos(2) = pos(2)+(1-row_add)*rows+400;
+hVideo5 = vision.VideoPlayer('Name','目标框定结果','Position',pos);
+pos(1) = pos(1)+cols;
+
+%保存加框处理后的视频
+vedio_k = VideoWriter(strrep(videofile,'.avi','[加框].avi')); %初始化一个avi文件
+vedio_k.FrameRate = 10;%帧率设为10（原视频的帧率是30）
+fpath='C:\Users\win10\Desktop\数字图像处理实验\大作业';
+open(vedio_k);%开始写入
+
+disp('开始进行目标跟踪检测...')
+time_0=0;
+while ~isDone(hReader)  %按帧处理
+    time_0=time_0+1;
+    frame  = step(hReader);%step函数提取帧图像
+    %RGB图像转为灰度图像
+    gray_1 = rgb2gray(frame);
+    gray = step(hFilter1,gray_1);%通过3*3中值滤波器
+    step(hVideo1, gray); %中值滤波结果
+    
+    flow = step(hFlow, gray);%使用Horn-Schunck光流法，flow是一个复数光流矢量矩阵
+    %每隔5行5列选择一个像素点，绘制它的光流图。放大20倍
+    %lines每行对应一条线，分别是第1和第2个点的x，y坐标
+    lines = [xpos, ypos, xpos+20*real(flow(locs)), ypos+imag(flow(locs))];
+    %将光流场矢量添加到视频帧上
+    vector = step(hShape2, frame, lines);
+    %计算光流矢量幅值
+    magnitude = flow .* conj(flow);
+    %计算光流幅值平均值，表征速度阈值
+    threshold = 0.5 * step(hMean2, step(hMean1, magnitude));
+    %使用阈值分割提取运动对象，然后去掉噪声
+    obj_1 = im2bw(magnitude,threshold);
+    obj = step(hFilter2,obj_1);
+    step(hVideo2, vector); %添加光流矢量后的结果
+    
+    
+    %通过形态学腐蚀去掉背景，然后形态学关闭填补目标孔洞
+    obj1 = step(hErode, obj);%形态学腐蚀
+    step(hVideo3, obj1);%形态学腐蚀后的结果
+    obj2 = step(hClose, obj1);%闭运算填充
+    obj2 = bwfill(obj2,'holes');%二值图像填充
+    step(hVideo4, obj2);%闭运算填充后的结果
+    
+    
+    %统计图像联通区域面积area和边框bbox[left,bottom,width,height]
+    [area, bbox,perimeter] = step(hBlob, obj2);
+    idx = bbox(:,1) > 0;%从初始0的位置开始统计
+    % 计算目标中心坐标，即矩形框的中心坐标
+    x  = bbox(:,1)+int32(bbox(:,3)/2);
+    y  = bbox(:,2)+int32(bbox(:,4)/2);
+    %     A=[A;x y];                      %存储框的中心坐标
+    w=int32(bbox(:,3));         %框长
+    h=int32(bbox(:,4));         %框高
+    
+    %flag的取值：检测模式标识flag=1才对目标添加边框
+    if(strcmp(videofile, 'video1.avi' )||strcmp(videofile, 'video2.avi' ) )
+        flag=abs(x_0-x)<cols/12 & abs(y_0-y)<rows/12 & w<1.6*h & w>0.6*h;%(小物体)检测
+        %小物体的框的中心点变化（切比雪夫距离）异常或框的长宽比失调，则flag=0,不进行框定和物像抓取
+    else
+        flag=1;%（大物体）检测，不作约束
+    end
+    
+    %检测开始
+    if flag
+        %给目标添加边框
+        result = step(hShape1,frame,bbox);
+        step(hVideo5, result);%目标框定
+        writeVideo(vedio_k,result);%合成video
+        x_0=x;y_0=y;
+        %识别靠近/远离
+        % S_m 距离判断指针
+        %f_sm为距离标识，f_sm=1表示物体靠近，f_sm=-1表示物体远离
+        if area-S>50 %当前面积大于前一次标记的面积，说明物体可能在靠近
+            S_m = S_m+1;
+        elseif  area-S<50%当前面积小于等于前一次标记的面积，说明物体可能在远离
+            S_m = S_m-1;
+        end
+        if S_m ==7 %标记S_m达到7，可以判定物体靠近，进行图像抓取
+            S_m= 0;%标记复位
+            if(f_sm==0||f_sm==-1)
+                disp(['第',num2str(time_0/video.FrameRate),'秒（',num2str(time_0),'帧),有目标靠近']);
+                f_sm=1;
+                th=th+1;
+                %imcrop函数切割出物体图像
+                thing = double(imcrop(frame,[bbox(idx,1)-6,bbox(idx,2)-8,bbox(idx,3)+18,bbox(idx,4)+9]));
+                figure;imshow(thing);title(['目标靠近抓取(',num2str(th),')'])
+            end
+        end
+        if S_m ==-7 %标记S_m达到-7，可以判定物体远离，进行图像抓取
+            S_m= 0;%标记复位
+            if(f_sm==0||f_sm==1)
+                 disp(['第',num2str(time_0/video.FrameRate),'秒（',num2str(time_0),'帧),有目标远离']);
+                f_sm=-1;
+                th=th+1;
+                %imcrop函数切割出物体图像
+                thing = double(imcrop(frame,[bbox(idx,1)-6,bbox(idx,2)-8,bbox(idx,3)+18,bbox(idx,4)+9]));
+                figure;imshow(thing);title(['目标远离抓取(',num2str(th),')'])
+            end
+        end
+        S =area;%更新当前的面积
+    else
+        %[小物体检测]如果框的中心点变化异常或框的长宽比失调，则不进行框定和物像抓取
+        step(hVideo5, frame);
+        writeVideo(vedio_k,frame);
+    end
+    % if(time_0==XX)
+    %     break;
+    % end
+end
+disp('目标跟踪检测结束。')
+release(hReader);
+disp(['输出加框视频：',strrep(videofile,'.avi','[加框].avi')])
+close(vedio_k);
